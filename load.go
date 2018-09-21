@@ -7,50 +7,55 @@ import (
 	"net/http"
 	"sync"
 	"time"
-)
 
-type Addresses struct {
-	Addresses map[string]Address
-}
-type Address struct {
-	URL      string
-	Times    []float64
-	Requests int
-	Failed   int
-}
+	"github.com/paulbellamy/ratecounter"
+)
 
 var client *http.Client
 var mutex = &sync.Mutex{}
+var counter = ratecounter.NewRateCounter(1 * time.Second)
 
 const requests = 300
 
+var listOfAddresses = []string{
+	"https://www.uutispuro.fi/fi",
+	"https://www.google.fi",
+	"https://portfolio.jelinden.fi",
+	"https://jelinden.fi",
+}
+
 func main() {
 	m := make(map[string]Address)
-	m["https://www.uutispuro.fi/fi"] = Address{URL: "https://www.uutispuro.fi/fi"}
-	m["https://www.google.fi"] = Address{URL: "https://www.google.fi"}
-	m["https://www.kauppalehti.fi"] = Address{URL: "https://www.kauppalehti.fi"}
-	m["https://m.kauppalehti.fi"] = Address{URL: "https://m.kauppalehti.fi"}
-	m["https://jelinden.fi"] = Address{URL: "https://jelinden.fi"}
-
+	for _, url := range listOfAddresses {
+		m[url] = Address{URL: url}
+	}
 	addresses := &Addresses{Addresses: m}
 
 	client = &http.Client{
-		Timeout: time.Second * 10,
+		Timeout: time.Second * 3,
 	}
 
 	c := make(chan bool, 10)
-	for k := 0; k < requests; k++ {
-		go getAddress(addresses, c)
-	}
+	// start up the printing of requests done per second
+	go doEvery(time.Second, printReqRate)
+	// run requests loop
+	runRequests(addresses, &c)
 
-	for k := 0; k < requests; k++ {
-		<-c
-	}
 	close(c)
 	printResults(*addresses)
 }
 
-func getAddress(addresses *Addresses, c chan bool) {
+func runRequests(addresses *Addresses, c *chan bool) {
+	for k := 0; k < requests; k++ {
+		go getAddresses(addresses, c)
+		time.Sleep(500 * time.Millisecond)
+	}
+	for k := 0; k < requests; k++ {
+		<-*c
+	}
+}
+
+func getAddresses(addresses *Addresses, c *chan bool) {
 	for _, item := range addresses.Addresses {
 		if res := get(item); res != nil {
 			mutex.Lock()
@@ -65,11 +70,12 @@ func getAddress(addresses *Addresses, c chan bool) {
 		}
 	}
 
-	c <- true
+	*c <- true
 }
 
 func get(address Address) *Address {
 	t := time.Now()
+	counter.Incr(1)
 	res, err := client.Get(address.URL)
 	if err != nil {
 		log.Println("ERROR", err)
@@ -83,6 +89,16 @@ func get(address Address) *Address {
 	}
 	address.Times = append(address.Times, time.Now().Sub(t).Seconds())
 	return &address
+}
+
+func printReqRate() {
+	log.Println("rate:", counter.Rate(), "req/s")
+}
+
+func doEvery(d time.Duration, f func()) {
+	for range time.Tick(d) {
+		f()
+	}
 }
 
 func printResults(addresses Addresses) {
@@ -109,4 +125,14 @@ func getMinMaxAvg(address Address) string {
 		min,
 		max,
 		avg/float64(len(address.Times)))
+}
+
+type Addresses struct {
+	Addresses map[string]Address
+}
+type Address struct {
+	URL      string
+	Times    []float64
+	Requests int
+	Failed   int
 }
